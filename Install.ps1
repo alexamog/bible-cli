@@ -68,7 +68,7 @@ foreach ($profilePath in $targets) {
     }
 
     try {
-        Add-Content -Path $profilePath -Value "`n# Bible Verse Lookup Tool`n$dotSourceLine`n" -Encoding utf8 -ErrorAction Stop
+        Add-Content -Path $profilePath -Value "`n# Bible Verse Lookup Tool`nClear-Host`n$dotSourceLine`n" -Encoding utf8 -ErrorAction Stop
     } catch {
         Write-Host "Could not write to $profilePath : $($_.Exception.Message)" -ForegroundColor Red
         Write-Host "Add this line to it yourself:  $dotSourceLine" -ForegroundColor Yellow
