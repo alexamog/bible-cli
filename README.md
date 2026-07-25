@@ -96,15 +96,27 @@ All single keypresses - no Enter.
 
 ## Install
 
-1. Unzip this folder anywhere.
+1. Clone or unzip this folder anywhere (keep it somewhere permanent - the
+   installer points your profile at the tool *in place*, so don't delete the
+   folder afterwards).
 2. Open PowerShell **in this folder** and run:
    ```powershell
    .\Install.ps1
    ```
-   This copies `BibleVerseTool.ps1` next to your PowerShell profile and adds
-   one line to your profile that loads it automatically in every new window.
-   It also creates a blank credentials file for you if one doesn't exist.
-3. Open `%USERPROFILE%\.lsm-verse.json` and replace the placeholders with your
+   If PowerShell refuses ("running scripts is disabled on this system"), run it
+   this way instead, then re-open a normal window afterwards:
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\Install.ps1
+   ```
+   (Optional, so scripts work permanently:
+   `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.)
+
+   The installer adds one line to your PowerShell profile that loads the tool
+   automatically in every new window (both Windows PowerShell 5.1 and
+   PowerShell 7). It also creates a blank credentials file for you if one
+   doesn't exist.
+3. Open your **credentials file** - `%USERPROFILE%\.lsm-verse.json` (i.e.
+   `C:\Users\<you>\.lsm-verse.json`) - and replace the placeholders with your
    real credentials from api.lsm.org:
    ```json
    {
@@ -112,6 +124,9 @@ All single keypresses - no Enter.
      "token": "YOUR_TOKEN"
    }
    ```
+   ⚠️ Put them in `.lsm-verse.json`, **not** in `.lsm-verse.example.json`. The
+   example file is tracked by git - real credentials pasted there can get
+   pushed and made public.
 4. Close and reopen PowerShell. Try:
    ```powershell
    verse John 3:16

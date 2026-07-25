@@ -3,57 +3,90 @@
     One-time setup for the Bible Verse Lookup Tool.
 
 .DESCRIPTION
-    1. Copies this folder's BibleVerseTool.ps1 next to your PowerShell profile
-       (if it isn't already there).
-    2. Adds a line to your PowerShell profile ($PROFILE) that dot-sources it,
-       so the "verse", "bible", and "savedverses" commands are available in
-       every new PowerShell window. Safe to re-run - it will not add the line
-       twice.
+    1. Dot-sources this repo's BibleVerseTool.ps1 directly from where you cloned
+       it, so the "verse", "bible", and "savedverses" commands are available in
+       every new PowerShell window. No copy is made - "git pull" updates the
+       live tool. Safe to re-run; it will not add the line twice.
+    2. Writes that line to BOTH the Windows PowerShell 5.1 and PowerShell 7
+       profiles, so it works whichever one you open.
     3. Creates your personal credentials file (%USERPROFILE%\.lsm-verse.json)
        from the example template if it does not already exist.
 
 .NOTES
+    If PowerShell refuses to run this ("running scripts is disabled"), start it
+    with:
+        powershell -ExecutionPolicy Bypass -File .\Install.ps1
+    and enable local scripts for future sessions:
+        Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+
     This script does NOT fill in your API token for you. Open the credentials
     file afterwards and paste in your own appid/token from https://api.lsm.org.
+    Put them in %USERPROFILE%\.lsm-verse.json - NOT in the tracked
+    .lsm-verse.example.json (that one is committed to git).
 #>
 
 $here       = $PSScriptRoot
 $toolSource = Join-Path $here "BibleVerseTool.ps1"
-$profileDir = Split-Path $PROFILE -Parent
-$toolDest   = Join-Path $profileDir "BibleVerseTool.ps1"
 
-if (-not (Test-Path $profileDir)) {
-    New-Item -ItemType Directory -Path $profileDir -Force | Out-Null
+if (-not (Test-Path $toolSource)) {
+    Write-Host "Cannot find BibleVerseTool.ps1 next to this installer ($toolSource)." -ForegroundColor Red
+    Write-Host "Run Install.ps1 from inside the cloned repo folder." -ForegroundColor Yellow
+    return
 }
 
-Copy-Item -Path $toolSource -Destination $toolDest -Force
-Write-Host "Copied BibleVerseTool.ps1 to $toolDest" -ForegroundColor Green
+# Files cloned/downloaded can carry a Mark-of-the-Web that blocks them under
+# RemoteSigned. Clear it so the profile can dot-source the tool.
+try { Unblock-File -Path $toolSource -ErrorAction Stop } catch { }
 
-if (-not (Test-Path $PROFILE)) {
-    New-Item -ItemType File -Path $PROFILE -Force | Out-Null
-}
+# The line the profile will run. Absolute path to the tool in this repo, so it
+# does not matter where the profile lives or which PowerShell edition loads it.
+$dotSourceLine = ". `"$toolSource`""
 
-$dotSourceLine = '. "$PSScriptRoot\BibleVerseTool.ps1"'
-$profileText   = Get-Content $PROFILE -Raw -ErrorAction SilentlyContinue
-if ($profileText -notmatch [regex]::Escape("BibleVerseTool.ps1")) {
+# Figure out both profile locations (5.1 = WindowsPowerShell, 7 = PowerShell).
+# Derive the Documents folder from the running host's own $PROFILE so OneDrive
+# folder redirection is handled correctly.
+$psDir = Split-Path $PROFILE -Parent
+$docs  = Split-Path $psDir  -Parent
+$targets = @(
+    (Join-Path $docs 'WindowsPowerShell\Microsoft.PowerShell_profile.ps1'),
+    (Join-Path $docs 'PowerShell\Microsoft.PowerShell_profile.ps1')
+) | Select-Object -Unique
+
+foreach ($profilePath in $targets) {
+    $profileDir = Split-Path $profilePath -Parent
+    if (-not (Test-Path $profileDir)) {
+        New-Item -ItemType Directory -Path $profileDir -Force | Out-Null
+    }
+    if (-not (Test-Path $profilePath)) {
+        New-Item -ItemType File -Path $profilePath | Out-Null
+    }
+
+    $profileText = Get-Content $profilePath -Raw -ErrorAction SilentlyContinue
+    if ($profileText -and $profileText -match [regex]::Escape("BibleVerseTool.ps1")) {
+        Write-Host "Profile already loads the tool - left untouched: $profilePath" -ForegroundColor Yellow
+        continue
+    }
+
     try {
-        Add-Content -Path $PROFILE -Value "`n# Bible Verse Lookup Tool`n$dotSourceLine`n" -ErrorAction Stop
+        Add-Content -Path $profilePath -Value "`n# Bible Verse Lookup Tool`n$dotSourceLine`n" -Encoding utf8 -ErrorAction Stop
     } catch {
-        Write-Host "Could not write to $PROFILE : $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "Could not write to $profilePath : $($_.Exception.Message)" -ForegroundColor Red
         Write-Host "Add this line to it yourself:  $dotSourceLine" -ForegroundColor Yellow
+        continue
     }
 
-    $verifyText = Get-Content $PROFILE -Raw -ErrorAction SilentlyContinue
-    if ($verifyText -match [regex]::Escape("BibleVerseTool.ps1")) {
-        Write-Host "Added dot-source line to your profile: $PROFILE" -ForegroundColor Green
+    # Verify the line actually landed (OneDrive sync or a lock can silently
+    # eat the write - the original bug this installer had).
+    $verifyText = Get-Content $profilePath -Raw -ErrorAction SilentlyContinue
+    if ($verifyText -and $verifyText -match [regex]::Escape("BibleVerseTool.ps1")) {
+        Write-Host "Added tool to profile: $profilePath" -ForegroundColor Green
     } else {
-        Write-Host "Profile still doesn't reference BibleVerseTool.ps1 after writing - something (maybe OneDrive sync) blocked the update." -ForegroundColor Red
-        Write-Host "Open $PROFILE yourself and add this line:  $dotSourceLine" -ForegroundColor Yellow
+        Write-Host "Wrote to $profilePath but the line is not there afterwards - something (maybe OneDrive sync) blocked it." -ForegroundColor Red
+        Write-Host "Open it yourself and add:  $dotSourceLine" -ForegroundColor Yellow
     }
-} else {
-    Write-Host "Profile already references BibleVerseTool.ps1 - left untouched." -ForegroundColor Yellow
 }
 
+# Personal credentials file, created from the example if missing.
 $credPath = Join-Path $HOME ".lsm-verse.json"
 if (-not (Test-Path $credPath)) {
     Copy-Item -Path (Join-Path $here ".lsm-verse.example.json") -Destination $credPath

@@ -2,4 +2,5 @@
 .lsm-verse.json
 
 # Saved verse references (personal, and written to your home directory).
+.lsm-saved-verses.txt
 .lsm-saved-verses.json
