@@ -25,10 +25,23 @@ free.
 ### The chapter reader (`bible`)
 
 Run `bible <book> <chapter>` (e.g. `bible Ephesians 4`). You'll see a page of
-verses with:
+verses framed by a header and a status strip:
 
 ```
-[N]ext page   [P]revious page   [S]ave verse   [Q]uit
+  Romans 13                                          Recovery Version
+  ───────────────────────────────────────────────────────────────────
+
+    1  Let every person be subject to the authorities over him, for
+       there is no authority except from God, and those which exist
+       are ordained by God.
+
+    2  So then he who resists the authority opposes the ordination
+       of God, and those who oppose will receive judgment.
+
+  ───────────────────────────────────────────────────────────────────
+  verses 1–2 of 14              N next   S save   ? define   Q quit
+  © 2003 Living Stream Ministry
+  ›
 ```
 
 Single keypress, **no Enter needed**:
@@ -79,15 +92,51 @@ nothing breaks.
 Tip: this reader is much nicer in a **tall, narrow terminal pane** - split
 your terminal vertically before running `bible`.
 
+### Book names are spelled out
+
+Type whatever's quickest - the heading always shows the full name. `bible
+rom 13` reads `Romans 13`, `verse 1 cor 13:4` reads `1 Corinthians 13:4`.
+Abbreviations, roman numerals and the API's own short forms all expand:
+
+| You type | You see |
+|---|---|
+| `rom 13` | Romans 13 |
+| `ss 1:2` | Song of Songs 1:2 |
+| `II Tim 3:16` | 2 Timothy 3:16 |
+| `ps 23` | Psalms 23 |
+
+This is display only. Saved references and clipboard copies keep working
+whatever you typed, and anything the tool doesn't recognise is shown as you
+typed it rather than dropped.
+
+### Colours
+
+The palette is periwinkle for anything you can act on - prompts, key hints,
+verse numbers - and a warm gold, periwinkle's complement, for headings and
+references. Everything else stays quiet and grey so the verse text is the
+brightest thing on screen.
+
+It's drawn with 24-bit colour, which every modern terminal handles (Windows
+Terminal, VS Code, PowerShell 7). On anything older it falls back to the
+16 console colours automatically. Set `NO_COLOR=1` to turn styling off
+entirely; the layout still lines up, using `-` and `>` in place of the
+box-drawing characters.
+
 ### Your saved verses (`verse list`)
 
 `verse list` opens a numbered list of everything you've saved:
 
 ```
-  1) Rom. 8:26    saved 2026-07-21 08:17:49
-  2) John 3:16    saved 2026-07-21 09:20:02
+  Saved verses                                              4 verses
+  ──────────────────────────────────────────────────────────────────
 
-press 1-9 to read   [N]ext   [D]elete   [Q]uit
+   1  Romans 8:26                              2026-07-21 08:17:49
+   2  John 3:16                                2026-07-21 09:20:02
+   3  1 Corinthians 13:4                       2026-07-22 11:02:10
+
+  ──────────────────────────────────────────────────────────────────
+  1–3 of 4                        1-9 read   N next   D delete   Q quit
+  ›
 ```
 
 Press a **number** to pull that verse from the API and read it (it also lands
