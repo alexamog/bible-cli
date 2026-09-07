@@ -28,6 +28,10 @@
 # terminals that can't do ANSI, so nothing breaks - it just gets blockier.
 # ------------------------------------------------------------
 
+try {
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+} catch { }
+
 $script:BibleEsc = [char]27
 $script:BibleAnsi = $null
 
@@ -118,7 +122,10 @@ function Get-BibleGlyph {
     # immune to PowerShell 5.1's encoding guessing.
     param([string]$Name)
 
-    if (Test-BibleAnsi) {
+    $utf8Ready = $false
+    try { $utf8Ready = ([Console]::OutputEncoding.CodePage -eq 65001) } catch { }
+
+    if ((Test-BibleAnsi) -and $utf8Ready) {
         switch ($Name) {
             'Rule'   { return [string][char]0x2500 }   # horizontal line
             'Prompt' { return [string][char]0x203A }   # single angle quote
