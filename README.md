@@ -15,17 +15,28 @@ free.
 
 ## Commands
 
-| Command | What it does |
-|---|---|
-| `verse John 3:16` | Prints the verse(s) and **copies the text to your clipboard**. |
-| `bible John 3` | Opens a full-chapter reader, one screen-page at a time, sized to your terminal window. |
-| `verse list` | Browse your saved verses. Press a number to read one - no Enter needed. |
-| `savedverses` | Prints every saved verse in one go (non-interactive). |
+| Command | Shorthand | What it does |
+|---|---|---|
+| `verse John 3:16` | `v John 3:16` | Prints the verse(s) and **copies the text to your clipboard**. |
+| `John 3:16` | `Rom 8:28` | Direct book command without needing `verse`! |
+| `verse random` | `v random` | Fetches an encouraging verse from beloved books. |
+| `bible Ephesians 1` | `b Eph 1` | Opens a full-chapter reader, sized to your terminal window. |
+| `bible Ephesians` | `b Eph` | Defaults automatically to **Chapter 1**. |
+| `verse list [filter]` | `v list Rom` | Browse saved verses, with optional book filter. |
+| `savedverses` | `savedverses -md` | Prints every saved verse in one go, or exports to Markdown blockquotes. |
+
+### Direct Book Commands & Aliases
+You can type Bible references directly in your PowerShell terminal:
+- `John 3:16` -> Looks up John 3:16 and copies to clipboard.
+- `Ephesians 1` -> Opens the interactive chapter reader for Ephesians 1.
+- `Ephesians` -> Opens Ephesians Chapter 1.
+- `v` is aliased to `verse`, and `b` is aliased to `bible`.
+- Tab completion works for book names: type `b Eph<Tab>` or `v Rom<Tab>`.
 
 ### The chapter reader (`bible`)
 
-Run `bible <book> <chapter>` (e.g. `bible Ephesians 4`). You'll see a page of
-verses framed by a header and a status strip:
+Run `bible <book> <chapter>` (e.g. `bible Ephesians 1` or just `b Ephesians`). You'll see a page of
+verses framed by a header and a status strip. The currently active verse is highlighted with an accent indicator (`›`) and centered on screen, displaying surrounding context before and after:
 
 ```
   Romans 13                                          Recovery Version
@@ -35,12 +46,12 @@ verses framed by a header and a status strip:
        there is no authority except from God, and those which exist
        are ordained by God.
 
-    2  So then he who resists the authority opposes the ordination
+  › 2  So then he who resists the authority opposes the ordination
        of God, and those who oppose will receive judgment.
 
   ───────────────────────────────────────────────────────────────────
-  verses 1–2 of 14              N next   S save   ? define   Q quit
-  © 2003 Living Stream Ministry
+  verses 1–2 of 14   [v.2 focused]      N next   P prev   [ ] ch   : jump   S save   C copy   ? define   Q quit
+  Holy Bible Recovery Version (text-only edition) © 2025 Living Stream Ministry www.lsm.org
   ›
 ```
 
@@ -48,13 +59,16 @@ Single keypress, **no Enter needed**:
 
 | Key | Does |
 |---|---|
-| `N` or `Space` or `PgDn` | Next page |
-| `P` or `PgUp` | Previous page |
+| `Up` / `Down` arrow | Move the active verse highlight up/down (centers with context) |
+| `N` or `Space` or `PgDn` | Next page (advances to next chapter at the end) |
+| `P` or `PgUp` | Previous page (moves to previous chapter at the start) |
+| `]` / `[` | Jump to **Next Chapter** / **Previous Chapter** immediately |
+| `:` | **Jump to verse** - type a number (e.g. `:14`) and press Enter |
+| `C` | **Copy a verse** - press Enter to copy the focused verse, or press a letter (`a`, `b`...) |
 | `S` or `Tab` | Save a verse - labels the verses `a`, `b`, `c`... press one letter |
-| `Q` or `Esc` | Quit |
-| `Up` / `Down` arrow | Scroll one verse at a time (best in a small window) |
-| `?` | Look up a word - type it, press Enter, then any key to return to your place (clipboard untouched) |
+| `?` | Look up a word definition (resilient with Datamuse fallback, clipboard untouched) |
 | `Backspace` | Go back to where you were reading before you jumped to another chapter |
+| `Q` or `Esc` | Quit |
 
 **Jumping to another chapter:** type the reference and press Enter, e.g.
 `John 4`.
@@ -124,7 +138,7 @@ box-drawing characters.
 
 ### Your saved verses (`verse list`)
 
-`verse list` opens a numbered list of everything you've saved:
+`verse list` opens a numbered list of everything you've saved. You can also filter by book: `verse list Rom`.
 
 ```
   Saved verses                                              4 verses
@@ -135,13 +149,17 @@ box-drawing characters.
    3  1 Corinthians 13:4                       2026-07-22 11:02:10
 
   ──────────────────────────────────────────────────────────────────
-  1–3 of 4                        1-9 read   N next   D delete   Q quit
+  1–3 of 4               1-9 read   N next   P prev   C copy   D delete   Q quit
   ›
 ```
 
-Press a **number** to pull that verse from the API and read it (it also lands
-on your clipboard). Press **D** then a number to delete one. **Q** goes back.
-All single keypresses - no Enter.
+- Press a **number** (1–9) to pull that verse from the API and read it (it also lands on your clipboard).
+- Press **C** then a number to **copy the verse text directly to your clipboard** without opening it.
+- Press **D** then a number to delete one.
+- **Q** goes back.
+
+#### Exporting to Markdown (`savedverses -Markdown`)
+Run `savedverses -Markdown` (or `savedverses -md`) to dump all your saved verses formatted as Markdown blockquotes and copy them to your clipboard ready for Obsidian, Notion, or Logseq.
 
 ## Install
 
