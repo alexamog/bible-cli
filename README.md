@@ -36,7 +36,9 @@ You can type Bible references directly in your PowerShell terminal:
 ### The chapter reader (`bible`)
 
 Run `bible <book> <chapter>` (e.g. `bible Ephesians 1` or just `b Ephesians`). You'll see a page of
-verses framed by a header and a status strip. The currently active verse is highlighted with an accent indicator (`›`) and centered on screen, displaying surrounding context before and after:
+verses framed by a header and a status strip with an interactive visual progress bar.
+
+The reader features **rock-solid spatial stability**: as long as you move within the visible viewport, verse text remains completely stationary on screen while only the `›` highlight marker moves through the verses. Boundary scrolling scrolls smoothly by 1 verse when reaching the bottom or top of the page.
 
 ```
   Romans 13                                          Recovery Version
@@ -50,7 +52,7 @@ verses framed by a header and a status strip. The currently active verse is high
        of God, and those who oppose will receive judgment.
 
   ───────────────────────────────────────────────────────────────────
-  verses 1–2 of 14   [v.2 focused]      N next   P prev   [ ] ch   : jump   S save   C copy   ? define   Q quit
+  verses 1–2 of 14   [━●━━━━━━] 14%   [v.2 focused]      N next   P prev   [ ] ch   / search   : jump   S save   C copy   ? define   Q quit
   Holy Bible Recovery Version (text-only edition) © 2025 Living Stream Ministry www.lsm.org
   ›
 ```
@@ -59,35 +61,35 @@ Single keypress, **no Enter needed**:
 
 | Key | Does |
 |---|---|
-| `Up` / `Down` arrow | Move the active verse highlight up/down (centers with context) |
+| `Up` / `Down` arrow | Move the active verse highlight marker up/down with stationary text (scrolls by 1 verse at boundaries) |
 | `N` or `Space` or `PgDn` | Next page (advances to next chapter at the end) |
 | `P` or `PgUp` | Previous page (moves to previous chapter at the start) |
 | `]` / `[` | Jump to **Next Chapter** / **Previous Chapter** immediately |
-| `:` | **Jump to verse** - type a number (e.g. `:14`) and press Enter |
-| `C` | **Copy a verse** - press Enter to copy the focused verse, or press a letter (`a`, `b`...) |
+| `/` | **In-Chapter Keyword Search** - type `/grace` or `/spirit` and press Enter to jump to the matching verse |
+| `n` / `N` | Jump to **next** (`n`) or **previous** (`N`) search match in the chapter |
+| `:` | **Jump to verse** - type a number (e.g. `:14`) and press Enter (centers target verse once) |
+| `C` | **Copy verse or range** - press Enter for focused verse, `a-c` for letter range, or `16-18` for verse range |
 | `S` or `Tab` | Save a verse - labels the verses `a`, `b`, `c`... press one letter |
 | `?` | Look up a word definition (resilient with Datamuse fallback, clipboard untouched) |
-| `Backspace` | Go back to where you were reading before you jumped to another chapter |
-| `Q` or `Esc` | Quit |
+| `Backspace` | Go back to where you were reading before you jumped |
+| `Q` or `Esc` | Quit (or cancel prompt) |
 
-**Jumping to another chapter:** type the reference and press Enter, e.g.
-`John 4`.
+### In-Chapter Keyword Search (`/`)
+Press `/` while reading, type a word (e.g. `/grace` or `/spirit`), and press Enter. The reader jumps to and highlights the next matching verse in the chapter.
+- Press `n` to jump to the next matching verse.
+- Press `N` to jump to the previous matching verse.
+- Press `/` and hit Enter to clear active search.
 
-One catch: `N`, `P`, `S`, and `Q` now fire instantly, so a book starting with
-those letters can't be typed directly. Press `/` first to open typing mode:
+### Multi-Verse Range Copying (`C`)
+Press `C` to copy text directly to your clipboard:
+- **Enter**: copies the currently focused verse.
+- **Letter or range** (`a` or `a-c`): copies visible verses by letter marker.
+- **Verse number range** (`16-18`): copies verses 16 through 18 formatted cleanly as a continuous passage:
+  `Ephesians 1:16-18 - Do not cease giving thanks for you... That the God of our Lord Jesus Christ...`
 
-```
-/Psalm 23        /Numbers 3        /Samuel 1        /Song of Songs 2
-```
+**Jumping to another chapter:** type the reference and press Enter, e.g. `John 4` or `/Psalm 23`.
 
-Everything else (`John`, `Acts`, `Romans`, `Ephesians`...) types normally with
-no prefix.
-
-**Getting back after a jump:** press `Backspace`. You return to the chapter
-you came from *and* the exact scroll position you left, not the top of it.
-Jumps stack, so pressing it repeatedly walks back through everything you
-looked up. (While you're typing a reference, `Backspace` still deletes
-characters as usual - it only means "go back" when the line is empty.)
+**Getting back after a jump:** press `Backspace`. You return to the chapter you came from *and* the exact scroll position you left, not the top of it. Jumps stack, so pressing it repeatedly walks back through everything you looked up. (While typing, `Backspace` deletes characters as usual; pressing `Esc` cancels typing without exiting).
 
 Long verses wrap with a hanging indent so continuation lines line up under
 the verse text (not the number), with a blank line between verses. The page
