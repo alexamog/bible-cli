@@ -165,9 +165,38 @@ function Get-BibleLayout {
     }
 }
 
+function Get-BibleRuleLine {
+    param($Layout, [string]$Color = 'Rule')
+    return (Get-BibleStyled -Text ($Layout.Pad + ((Get-BibleGlyph 'Rule') * $Layout.Content)) -Color $Color)
+}
+
 function Write-BibleRule {
     param($Layout, [string]$Color = 'Rule')
-    Write-BibleStyled ($Layout.Pad + ((Get-BibleGlyph 'Rule') * $Layout.Content)) -Color $Color
+    Write-Host (Get-BibleRuleLine -Layout $Layout -Color $Color)
+}
+
+function Get-BibleHeaderLines {
+    # Returns the header lines for the chapter reader or verse command.
+    param(
+        [string]$Title,
+        [string]$Note = "",
+        $Layout,
+        [string]$TitleColor = 'Gold'
+    )
+
+    $line = $Layout.Pad + (Get-BibleStyled -Text $Title -Color $TitleColor -Bold)
+    if ($Note) {
+        $gap = $Layout.Content - $Title.Length - $Note.Length
+        if ($gap -ge 3) {
+            $line += (" " * $gap) + (Get-BibleStyled -Text $Note -Color 'Muted')
+        }
+    }
+    return @(
+        "",
+        $line,
+        (Get-BibleRuleLine -Layout $Layout),
+        ""
+    )
 }
 
 function Write-BibleHeader {
@@ -179,17 +208,9 @@ function Write-BibleHeader {
         [string]$TitleColor = 'Gold'
     )
 
-    Write-Host ""
-    $line = $Layout.Pad + (Get-BibleStyled -Text $Title -Color $TitleColor -Bold)
-    if ($Note) {
-        $gap = $Layout.Content - $Title.Length - $Note.Length
-        if ($gap -ge 3) {
-            $line += (" " * $gap) + (Get-BibleStyled -Text $Note -Color 'Muted')
-        }
+    foreach ($l in @(Get-BibleHeaderLines -Title $Title -Note $Note -Layout $Layout -TitleColor $TitleColor)) {
+        Write-Host $l
     }
-    Write-Host $line
-    Write-BibleRule -Layout $Layout
-    Write-Host ""
 }
 
 function Get-BibleStatusLines {
@@ -249,11 +270,21 @@ function Write-BibleStatusBar {
     }
 }
 
+function Get-BibleNoteLines {
+    param($Layout, [string]$Text, [string]$Color = 'Muted')
+
+    $lines = @()
+    foreach ($l in @(Get-BibleWrappedLines -Text $Text -PrefixLength $Layout.Margin -Width $Layout.Text)) {
+        $lines += (Get-BibleStyled -Text ($Layout.Pad + $l) -Color $Color)
+    }
+    return @($lines)
+}
+
 function Write-BibleNote {
     param($Layout, [string]$Text, [string]$Color = 'Muted')
 
-    foreach ($l in @(Get-BibleWrappedLines -Text $Text -PrefixLength $Layout.Margin -Width $Layout.Text)) {
-        Write-BibleStyled ($Layout.Pad + $l) -Color $Color
+    foreach ($l in @(Get-BibleNoteLines -Layout $Layout -Text $Text -Color $Color)) {
+        Write-Host $l
     }
 }
 
@@ -624,7 +655,7 @@ function Split-BibleEmphasis {
     return @($tokens)
 }
 
-function Write-BibleText {
+function Get-BibleTextLines {
     # Word-wraps on VISIBLE width (styling is applied at print time, never
     # baked into the string - ANSI codes would otherwise be counted as
     # characters and wreck the wrapping).
@@ -658,13 +689,15 @@ function Write-BibleText {
     $line   = @()   # tokens on the current line
     $len    = 0
     $first  = $true
+    $resultLines = New-Object System.Collections.Generic.List[string]
 
     $flush = {
-        if ($first) {
-            if ($Prefix) { Write-BibleStyled $Prefix -Color $PrefixColor -NoNewline }
+        $prefixStr = if ($first) {
+            if ($Prefix) { Get-BibleStyled -Text $Prefix -Color $PrefixColor } else { "" }
         } else {
-            Write-Host $indent -NoNewline
+            $indent
         }
+
         # Build the line as one string, opening/closing italics only when the
         # emphasis actually changes, so "[a period of]" is a single run.
         $sb   = ""
@@ -678,7 +711,7 @@ function Write-BibleText {
             $sb += $line[$j].Text
         }
         if ($open) { $sb += $italicOff }   # never leave italics on at line end
-        Write-Host ($bodyCode + $sb + $reset)
+        $resultLines.Add($prefixStr + $bodyCode + $sb + $reset)
     }
 
     foreach ($t in $tokens) {
@@ -694,12 +727,25 @@ function Write-BibleText {
         $len  += $add
     }
     if ($line.Count -gt 0) { & $flush }
-    elseif ($first -and $Prefix) { Write-BibleStyled $Prefix -Color $PrefixColor }
+    elseif ($first -and $Prefix) { $resultLines.Add((Get-BibleStyled -Text $Prefix -Color $PrefixColor)) }
+
+    return @($resultLines)
 }
 
-function Write-BibleVerseLine {
-    # Prints a verse with its number, wrapping long text with a hanging
-    # indent so continuation lines line up under the verse text, not the number.
+function Write-BibleText {
+    param(
+        [string]$Text,
+        [string]$Prefix       = "",
+        [string]$PrefixColor  = "AccentDim",
+        [int]   $Width,
+        [switch]$Highlight
+    )
+    foreach ($l in @(Get-BibleTextLines -Text $Text -Prefix $Prefix -PrefixColor $PrefixColor -Width $Width -Highlight:$Highlight)) {
+        Write-Host $l
+    }
+}
+
+function Get-BibleVerseLines {
     param(
         [string]$Number,
         [string]$Text,
@@ -714,11 +760,26 @@ function Write-BibleVerseLine {
         $prefixColor = 'Gold'
     }
 
-    Write-BibleText -Text $Text `
-                    -Prefix ($Layout.Pad + $numStr) `
-                    -PrefixColor $prefixColor `
-                    -Width $Layout.Text `
-                    -Highlight:$Selected
+    return @(Get-BibleTextLines -Text $Text `
+                                -Prefix ($Layout.Pad + $numStr) `
+                                -PrefixColor $prefixColor `
+                                -Width $Layout.Text `
+                                -Highlight:$Selected)
+}
+
+function Write-BibleVerseLine {
+    # Prints a verse with its number, wrapping long text with a hanging
+    # indent so continuation lines line up under the verse text, not the number.
+    param(
+        [string]$Number,
+        [string]$Text,
+        $Layout,
+        [switch]$Selected
+    )
+
+    foreach ($l in @(Get-BibleVerseLines -Number $Number -Text $Text -Layout $Layout -Selected:$Selected)) {
+        Write-Host $l
+    }
 }
 
 function Get-BibleVerseNumber {
@@ -1413,77 +1474,112 @@ function bible {
     $searchQuery = ""
     $searchMatchIndex = -1
 
-    while ($true) {
-        Clear-Host
-        $layout = Get-BibleLayout   # re-read every draw so resizing is honoured
+    $useAltBuffer = Test-BibleAnsi
+    if ($useAltBuffer) {
+        [Console]::Out.Write("$script:BibleEsc[?1049h")
+    }
 
-        try   { $termHeight = $Host.UI.RawUI.WindowSize.Height }
-        catch { $termHeight = 25 }
+    try {
+        while ($true) {
+            $layout = Get-BibleLayout   # re-read every draw so resizing is honoured
 
-        # Keep selected verse bounded
-        if ($selectedVerseIndex -lt 0) { $selectedVerseIndex = 0 }
-        if ($selectedVerseIndex -ge $verses.Count) { $selectedVerseIndex = [Math]::Max(0, $verses.Count - 1) }
+            try   { $termHeight = $Host.UI.RawUI.WindowSize.Height }
+            catch { $termHeight = 25 }
 
-        # Reserve chrome: blank + title + rule + blank above, rule + status + copyright + prompt below
-        $focusedNum = Get-BibleVerseNumber -Verse $verses[$selectedVerseIndex] -Fallback ($selectedVerseIndex + 1)
-        $bar = Get-BibleProgressBar -Current $selectedVerseIndex -Total $verses.Count -Width 8
-        $dash = Get-BibleGlyph 'Dash'
-        $probeStatus = "verses {0}{1}{0} of {0}   {2}   [v.{3} focused]" -f $verses.Count, $dash, $bar, $focusedNum
-        $probeHints  = @(, @("n/N", "match 99/99"), @("[ ]", "ch"), @("/", "search"), @(":", "jump"), @("S", "save"), @("C", "copy"), @("?", "define"), @("Q", "quit"))
-        $chrome = 7 + @(Get-BibleStatusLines -Layout $layout -Status $probeStatus -Hints $probeHints).Count
-        if ($result.copyright) {
-            $chrome += @(Get-BibleWrappedLines -Text $result.copyright -PrefixLength $layout.Margin -Width $layout.Text).Count
-        }
-        $availableLines = [Math]::Max(3, $termHeight - $chrome)
+            # Keep selected verse bounded
+            if ($selectedVerseIndex -lt 0) { $selectedVerseIndex = 0 }
+            if ($selectedVerseIndex -ge $verses.Count) { $selectedVerseIndex = [Math]::Max(0, $verses.Count - 1) }
 
-        # Viewport anchoring: keep $index stationary when moving within viewport
-        if ($index -lt 0) { $index = 0 }
-        if ($index -ge $verses.Count) { $index = [Math]::Max(0, $verses.Count - 1) }
-        if ($selectedVerseIndex -lt $index) { $index = $selectedVerseIndex }
+            # Reserve chrome: blank + title + rule + blank above, rule + status + copyright + prompt below
+            $focusedNum = Get-BibleVerseNumber -Verse $verses[$selectedVerseIndex] -Fallback ($selectedVerseIndex + 1)
+            $bar = Get-BibleProgressBar -Current $selectedVerseIndex -Total $verses.Count -Width 8
+            $dash = Get-BibleGlyph 'Dash'
+            $probeStatus = "verses {0}{1}{0} of {0}   {2}   [v.{3} focused]" -f $verses.Count, $dash, $bar, $focusedNum
+            $probeHints  = @(, @("n/N", "match 99/99"), @("[ ]", "ch"), @("/", "search"), @(":", "jump"), @("S", "save"), @("C", "copy"), @("?", "define"), @("Q", "quit"))
+            $chrome = 7 + @(Get-BibleStatusLines -Layout $layout -Status $probeStatus -Hints $probeHints).Count
+            if ($result.copyright) {
+                $chrome += @(Get-BibleWrappedLines -Text $result.copyright -PrefixLength $layout.Margin -Width $layout.Text).Count
+            }
+            $availableLines = [Math]::Max(3, $termHeight - $chrome)
 
-        $pageEnd = Get-BiblePageEnd -StartIndex $index -Verses $verses -AvailableLines $availableLines -Layout $layout
-        while ($selectedVerseIndex -gt $pageEnd -and $index -lt $selectedVerseIndex) {
-            $index++
+            # Viewport anchoring: keep $index stationary when moving within viewport
+            if ($index -lt 0) { $index = 0 }
+            if ($index -ge $verses.Count) { $index = [Math]::Max(0, $verses.Count - 1) }
+            if ($selectedVerseIndex -lt $index) { $index = $selectedVerseIndex }
+
             $pageEnd = Get-BiblePageEnd -StartIndex $index -Verses $verses -AvailableLines $availableLines -Layout $layout
-        }
+            while ($selectedVerseIndex -gt $pageEnd -and $index -lt $selectedVerseIndex) {
+                $index++
+                $pageEnd = Get-BiblePageEnd -StartIndex $index -Verses $verses -AvailableLines $availableLines -Layout $layout
+            }
 
-        Write-BibleHeader -Title (Expand-BibleReference $chapterRef) -Note "Recovery Version" -Layout $layout
+            $frameLines = New-Object System.Collections.Generic.List[string]
 
-        for ($i = $index; $i -le $pageEnd; $i++) {
-            $isSel = ($i -eq $selectedVerseIndex)
-            Write-BibleVerseLine -Number (Get-BibleVerseNumber -Verse $verses[$i] -Fallback ($i + 1)) `
-                                 -Text $verses[$i].text -Layout $layout -Selected:$isSel
-            Write-Host ""
-        }
+            foreach ($hl in @(Get-BibleHeaderLines -Title (Expand-BibleReference $chapterRef) -Note "Recovery Version" -Layout $layout)) {
+                $frameLines.Add($hl)
+            }
 
-        Write-BibleRule -Layout $layout
+            for ($i = $index; $i -le $pageEnd; $i++) {
+                $isSel = ($i -eq $selectedVerseIndex)
+                $vNum = Get-BibleVerseNumber -Verse $verses[$i] -Fallback ($i + 1)
+                foreach ($vl in @(Get-BibleVerseLines -Number $vNum -Text $verses[$i].text -Layout $layout -Selected:$isSel)) {
+                    $frameLines.Add($vl)
+                }
+                $frameLines.Add("")
+            }
 
-        $hasNext = ($pageEnd + 1) -lt $verses.Count
-        $hasPrev = $index -gt 0
-        $hints = @()
-        if ($searchMatches.Count -gt 0) {
-            $hints += , @("n/N", "match $($searchMatchIndex + 1)/$($searchMatches.Count)")
-        } else {
-            if ($hasNext) { $hints += , @("N", "next") }
-            if ($hasPrev) { $hints += , @("P", "prev") }
-        }
-        $hints += , @("[ ]", "ch")
-        $hints += , @("/", "search")
-        $hints += , @(":", "jump")
-        $hints += , @("S", "save")
-        $hints += , @("C", "copy")
-        $hints += , @("?", "define")
-        $hints += , @("Q", "quit")
+            $frameLines.Add((Get-BibleRuleLine -Layout $layout))
 
-        $status = "verses {0}{1}{2} of {3}   {4}   [v.{5} focused]" -f ($index + 1), $dash, ($pageEnd + 1), $verses.Count, $bar, $focusedNum
-        Write-BibleStatusBar -Layout $layout -Status $status -Hints $hints
-        if ($result.copyright) {
-            Write-BibleNote -Layout $layout -Text $result.copyright
-        }
-        Write-Host ""
+            $hasNext = ($pageEnd + 1) -lt $verses.Count
+            $hasPrev = $index -gt 0
+            $hints = @()
+            if ($searchMatches.Count -gt 0) {
+                $hints += , @("n/N", "match $($searchMatchIndex + 1)/$($searchMatches.Count)")
+            } else {
+                if ($hasNext) { $hints += , @("N", "next") }
+                if ($hasPrev) { $hints += , @("P", "prev") }
+            }
+            $hints += , @("[ ]", "ch")
+            $hints += , @("/", "search")
+            $hints += , @(":", "jump")
+            $hints += , @("S", "save")
+            $hints += , @("C", "copy")
+            $hints += , @("?", "define")
+            $hints += , @("Q", "quit")
 
-        Write-BiblePrompt -Layout $layout
-        $input = Read-BibleInput
+            $status = "verses {0}{1}{2} of {3}   {4}   [v.{5} focused]" -f ($index + 1), $dash, ($pageEnd + 1), $verses.Count, $bar, $focusedNum
+            foreach ($sl in @(Get-BibleStatusLines -Layout $layout -Status $status -Hints $hints)) {
+                $frameLines.Add($sl)
+            }
+            if ($result.copyright) {
+                foreach ($cl in @(Get-BibleNoteLines -Layout $layout -Text $result.copyright)) {
+                    $frameLines.Add($cl)
+                }
+            }
+            $frameLines.Add("")
+
+            $prompt = $layout.Pad + (Get-BibleStyled -Text (Get-BibleGlyph 'Prompt') -Color 'Accent' -Bold) + " "
+
+            if (Test-BibleAnsi) {
+                $el = "$script:BibleEsc[K"
+                $sb = New-Object System.Text.StringBuilder
+                [void]$sb.Append("$script:BibleEsc[?25l$script:BibleEsc[H")
+                foreach ($fl in $frameLines) {
+                    [void]$sb.Append($fl)
+                    [void]$sb.Append($el)
+                    [void]$sb.Append("`r`n")
+                }
+                [void]$sb.Append($prompt)
+                [void]$sb.Append($el)
+                [void]$sb.Append("$script:BibleEsc[J$script:BibleEsc[?25h")
+                [Console]::Out.Write($sb.ToString())
+            } else {
+                Clear-Host
+                foreach ($fl in $frameLines) { Write-Host $fl }
+                Write-Host $prompt -NoNewline
+            }
+
+            $input = Read-BibleInput
 
         switch ($input.Action) {
             "ScrollDown" {
@@ -1977,6 +2073,12 @@ function bible {
                     }
                 }
             }
+        }
+        }
+    }
+    finally {
+        if ($useAltBuffer) {
+            [Console]::Out.Write("$script:BibleEsc[?1049l$script:BibleEsc[?25h")
         }
     }
 }
