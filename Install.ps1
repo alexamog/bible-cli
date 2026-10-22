@@ -114,3 +114,5 @@ try {
 
 Write-Host ""
 Write-Host "Setup complete. Close and reopen PowerShell, then try:  verse John 3:16" -ForegroundColor Cyan
+Write-Host "Have the Recovery Version EPUB? Read from it (with footnotes, no API needed):" -ForegroundColor Cyan
+Write-Host "  Set-BibleEpub `"C:\path\to\HolyBible.epub`"" -ForegroundColor Cyan

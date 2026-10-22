@@ -4,6 +4,8 @@
 #   verse <reference>        e.g.  verse John 3:16
 #   verse list               browse your saved references
 #   bible <book> <chapter>   e.g.  bible John 3        (paged chapter reader)
+#   Set-BibleEpub <path>     read from your Recovery Version EPUB instead of
+#                            the API - adds footnotes (F in the reader)
 #
 # Word lookup lives INSIDE the chapter reader only: press ? while reading.
 #   savedverses              print every saved verse in one go
@@ -11,6 +13,8 @@
 # Credentials live in:  %USERPROFILE%\.lsm-verse.json
 #   { "appid": "YOUR_APPID", "token": "YOUR_TOKEN" }
 # Register at https://api.lsm.org to get an appid + token.
+# With "epub": "C:\path\HolyBible.epub" in the same file, no API (and no
+# credentials) are needed at all.
 #
 # Saved references are stored in: %USERPROFILE%\.lsm-saved-verses.txt
 #
@@ -289,11 +293,13 @@ function Wait-BibleKey {
 # gets saved to disk and sent back to the API is always the API's own form.
 # ------------------------------------------------------------
 
-$script:BibleBookMap = $null
+$script:BibleBookMap   = $null
+$script:BibleBookNames = $null
 
 function Get-BibleBookMap {
     if ($script:BibleBookMap) { return $script:BibleBookMap }
 
+    # Canonical order matters: the EPUB numbers its files 01-66 in this order.
     $books = [ordered]@{
         'Genesis'         = 'gen ge gn'
         'Exodus'          = 'exo ex exod exd'
@@ -393,8 +399,19 @@ function Get-BibleBookMap {
         }
     }
 
-    $script:BibleBookMap = $map
+    $script:BibleBookNames = @($books.Keys)
+    $script:BibleBookMap   = $map
     return $map
+}
+
+function Get-BibleBookNumber {
+    # "John" -> 43. Full names only - run Expand-BibleReference first.
+    param([string]$Name)
+
+    Get-BibleBookMap | Out-Null
+    $i = [Array]::IndexOf($script:BibleBookNames, $Name)
+    if ($i -lt 0) { return 0 }
+    return $i + 1
 }
 
 function Expand-BibleReference {
@@ -506,6 +523,429 @@ function Invoke-DictApi {
     }
 }
 
+function Get-BiblePassage {
+    # The one place that decides where verse text comes from: your EPUB when
+    # one is configured, otherwise api.lsm.org. Both hand back the same shape
+    # - { verses; copyright; message } - so the commands never need to care.
+    param([Parameter(Mandatory)][string]$Reference)
+
+    if (Get-BibleEpubPath) { return Invoke-BibleEpub -Reference $Reference }
+    return Invoke-LsmApi -Reference $Reference
+}
+
+
+# ------------------------------------------------------------
+# EPUB source
+#
+# With "epub" set in .lsm-verse.json, verses come from your own copy of the
+# Recovery Version EPUB instead of the API - no credentials needed, and the
+# EPUB carries the footnotes and cross-references the API does not. It is
+# read live, straight out of the zip; nothing is extracted to disk.
+#
+# Layout inside the zip: one file per chapter, NN_Book_C.htm (NN = 01-66 in
+# canonical order), and its notes alongside as NN_Book_nC.htm.
+# ------------------------------------------------------------
+
+$script:BibleEpubIndex = $null
+$script:BibleEpubCache = @{}
+
+function Get-BibleConfigPath {
+    return (Join-Path $HOME ".lsm-verse.json")
+}
+
+function Get-BibleEpubPath {
+    # The configured path, or $null when no EPUB is set (= use the API). A
+    # path that no longer exists is still returned, so the reader can say so
+    # instead of silently falling back to the API.
+    $configPath = Get-BibleConfigPath
+    if (-not (Test-Path $configPath)) { return $null }
+    try   { $config = Get-Content $configPath -Raw | ConvertFrom-Json }
+    catch { return $null }
+    if (-not $config -or -not $config.epub) { return $null }
+    return [Environment]::ExpandEnvironmentVariables("$($config.epub)")
+}
+
+function Open-BibleEpubZip {
+    param([string]$Path)
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    return [IO.Compression.ZipFile]::OpenRead($Path)
+}
+
+function Get-BibleEpubIndex {
+    # Maps "book|chapter" -> the zip entries holding its text and its notes.
+    # Cached until the file changes.
+    param([string]$Path)
+
+    $stamp = (Get-Item -LiteralPath $Path).LastWriteTimeUtc.Ticks
+    $key   = "$Path|$stamp"
+    if ($script:BibleEpubIndex -and $script:BibleEpubIndex.Key -eq $key) {
+        return $script:BibleEpubIndex
+    }
+
+    $chapters = @{}
+    $zip = Open-BibleEpubZip -Path $Path
+    try {
+        foreach ($e in $zip.Entries) {
+            if ($e.FullName -notmatch '^(?:.*/)?(\d{2})_[^_/]+_(n?)(\d+)\.htm$') { continue }
+            $id = "{0}|{1}" -f [int]$matches[1], [int]$matches[3]
+            if (-not $chapters.ContainsKey($id)) { $chapters[$id] = @{ Text = $null; Notes = $null } }
+            if ($matches[2]) { $chapters[$id].Notes = $e.FullName }
+            else             { $chapters[$id].Text  = $e.FullName }
+        }
+    } finally {
+        $zip.Dispose()
+    }
+
+    $script:BibleEpubCache = @{}
+    $script:BibleEpubIndex = [PSCustomObject]@{ Key = $key; Chapters = $chapters }
+    return $script:BibleEpubIndex
+}
+
+function Read-BibleEpubEntry {
+    param($Zip, [string]$Name)
+
+    $entry = $Zip.GetEntry($Name)
+    if (-not $entry) { return "" }
+    $reader = New-Object IO.StreamReader($entry.Open(), [Text.Encoding]::UTF8)
+    try     { return $reader.ReadToEnd() }
+    finally { $reader.Dispose() }
+}
+
+function ConvertFrom-BibleEpubHtml {
+    # A fragment of the EPUB's XHTML -> one line of plain text. With
+    # -Supplied, <i> (words the translators supplied) becomes the same
+    # [bracket] notation the API uses, so the italics rendering is shared.
+    param([string]$Html, [switch]$Supplied)
+
+    $t = $Html
+    if ($Supplied) {
+        $t = $t -replace '<i>', '[' -replace '</i>', ']'
+    }
+    $t = $t -replace '<br\s*/?>', ' '
+    $t = $t -replace '<[^>]+>', ''
+    $t = [Net.WebUtility]::HtmlDecode($t)
+    $t = $t -replace [string][char]0xA0, ' '
+    $t = ($t -replace '\s+', ' ').Trim()
+    if ($Supplied) {
+        $t = $t -replace '\[\s*\]', ''
+        # Pull touching punctuation inside the brackets - "[He]," would
+        # otherwise print as "He ," - which is also how the API writes it.
+        $t = [regex]::Replace($t, '([^\s\[\]]*)\[([^\]]*)\]([^\s\[\]]*)', {
+            param($m) "[" + $m.Groups[1].Value + $m.Groups[2].Value.Trim() + $m.Groups[3].Value + "]"
+        })
+    }
+    return $t
+}
+
+function Get-BibleNoteKey {
+    # Normalised form for matching a note's word against verse text.
+    param([string]$Word)
+    return ($Word -replace '[^\p{L}\p{N}]', '').ToLower()
+}
+
+function Find-BibleTokenRun {
+    # First position at or after $Start where $Want appears as a run of
+    # consecutive tokens. -1 if it does not.
+    param([string[]]$Keys, [string[]]$Want, [int]$Start)
+
+    for ($i = [Math]::Max(0, $Start); $i -le ($Keys.Count - $Want.Count); $i++) {
+        $ok = $true
+        for ($j = 0; $j -lt $Want.Count; $j++) {
+            if ($Keys[$i + $j] -ne $Want[$j]) { $ok = $false; break }
+        }
+        if ($ok) { return $i }
+    }
+    return -1
+}
+
+function Set-BibleVerseMarks {
+    # Works out which word each footnote/cross-reference hangs on, as
+    # token index -> label, using the same tokens Write-BibleText prints.
+    #
+    # The notes only name the word ("born"), not its position, so a repeated
+    # word is ambiguous. Footnote numbers and cross-reference letters each run
+    # in reading order, so each sequence keeps its own cursor and searches on
+    # from its last hit - that lands on the right "God" in John 3:2.
+    param($Verse)
+
+    $tokens = @(Split-BibleEmphasis -Text $Verse.text)
+    $keys   = @($tokens | ForEach-Object { Get-BibleNoteKey $_.Text })
+    $parts  = @($tokens | ForEach-Object { , @(($_.Text -split '[-\u2014]') | ForEach-Object { Get-BibleNoteKey $_ }) })
+    $marks     = @{}
+    $numCursor = 0
+    $letCursor = 0
+
+    foreach ($n in @($Verse.notes)) {
+        if ($n.NoMark -or -not $n.Word) { continue }
+        $want = @(($n.Word -split '\s+') | ForEach-Object { Get-BibleNoteKey $_ } | Where-Object { $_ })
+        if ($want.Count -eq 0 -or $want.Count -gt $keys.Count) { continue }
+
+        $hasNum = $n.Label -match '\d|\*'
+        $hasLet = $n.Label -match '[a-z]'
+        $start  = 0
+        if ($hasNum) { $start = [Math]::Max($start, $numCursor) }
+        if ($hasLet) { $start = [Math]::Max($start, $letCursor) }
+
+        $hit = Find-BibleTokenRun -Keys $keys -Want $want -Start $start
+        if ($hit -lt 0) { $hit = Find-BibleTokenRun -Keys $keys -Want $want -Start 0 }
+        if ($hit -lt 0 -and $want.Count -eq 1) {
+            # Half of a hyphenated word: "out" in "out-resurrection".
+            for ($i = 0; $i -lt $parts.Count; $i++) {
+                if ($parts[$i] -contains $want[0]) { $hit = $i; break }
+            }
+        }
+        if ($hit -lt 0) { continue }
+
+        $last = $hit + $want.Count - 1
+        if ($marks.ContainsKey($last)) { $marks[$last] += $n.Label }
+        else                           { $marks[$last]  = $n.Label }
+        if ($hasNum) { $numCursor = $last + 1 }
+        if ($hasLet) { $letCursor = $last + 1 }
+    }
+
+    $Verse.marks = $marks
+}
+
+function Read-BibleEpubChapter {
+    # Parses one chapter and its notes into verse objects:
+    #   { ref; num; text; notes; marks }
+    # where each note is { Label; Word; Paragraphs; Xref; NoMark }.
+    # Returns $null if the EPUB has no such chapter.
+    param([string]$Path, [int]$Book, [int]$Chapter)
+
+    $index = Get-BibleEpubIndex -Path $Path
+    $id    = "$Book|$Chapter"
+    if ($script:BibleEpubCache.ContainsKey($id)) { return $script:BibleEpubCache[$id] }
+
+    $entry = $index.Chapters[$id]
+    if (-not $entry -or -not $entry.Text) { return $null }
+
+    $zip = Open-BibleEpubZip -Path $Path
+    try {
+        $html  = Read-BibleEpubEntry -Zip $zip -Name $entry.Text
+        $notes = if ($entry.Notes) { Read-BibleEpubEntry -Zip $zip -Name $entry.Notes } else { "" }
+    } finally {
+        $zip.Dispose()
+    }
+
+    Get-BibleBookMap | Out-Null   # fills $script:BibleBookNames
+    $bookName = $script:BibleBookNames[$Book - 1]
+    $verses   = New-Object System.Collections.Generic.List[object]
+    $byNum    = @{}
+
+    $opts = [Text.RegularExpressions.RegexOptions]::Singleline
+    foreach ($m in [regex]::Matches($html, '<p class="(verse|nnverse)"([^>]*)>(.*?)</p>', $opts)) {
+        # Drop the leading <b>Jn 3:16</b> - the verse number comes from the id.
+        $body = $m.Groups[3].Value -replace '^\s*<b>.*?</b>', ''
+        $text = ConvertFrom-BibleEpubHtml -Html $body -Supplied
+
+        if ($m.Groups[1].Value -eq 'nnverse') {
+            # A new paragraph that is still the same verse (no number).
+            if ($verses.Count -gt 0) {
+                $last = $verses[$verses.Count - 1]
+                $last.text = "$($last.text) $text".Trim()
+            }
+            continue
+        }
+
+        if ($m.Groups[2].Value -notmatch 'id="[^"]*-(\d+)"') { continue }
+        $num = [int]$matches[1]
+        $v = [PSCustomObject]@{
+            ref   = "$bookName ${Chapter}:$num"
+            num   = $num
+            text  = $text
+            notes = $null
+            marks = $null
+        }
+        $verses.Add($v)
+        $byNum[$num] = $v
+    }
+
+    $copyright = $null
+    if ($html -match '(?s)<p class="bottom-copyright">(.*?)</p>') {
+        $copyright = ConvertFrom-BibleEpubHtml -Html $matches[1]
+    }
+
+    # Notes: one <div> each. "n3_3_1" is footnote 1 on verse 3, "c3_5_a" is
+    # cross-reference a on verse 5. A footnote with its own cross-reference
+    # carries both in its label ("1a").
+    $noteLists = @{}
+    foreach ($d in [regex]::Matches($notes, '<div id="[nc]\d+_(\d+)_[^"]*">(.*?)</div>', $opts)) {
+        $vnum  = [int]$d.Groups[1].Value
+        $inner = $d.Groups[2].Value
+
+        $label = ""
+        $word  = ""
+        if ($inner -match '(?s)<p class="note-head"[^>]*>.*?<sup>(.*?)</sup>(.*?)</a>') {
+            $label = ConvertFrom-BibleEpubHtml -Html $matches[1]
+            $word  = ConvertFrom-BibleEpubHtml -Html $matches[2]
+        }
+        $xref = ""
+        if ($inner -match '(?s)<span class="xref"[^>]*>(.*?)</span>') {
+            $xref = ConvertFrom-BibleEpubHtml -Html $matches[1]
+        }
+        $paras = @(foreach ($p in [regex]::Matches($inner, '<p class="note">(.*?)</p>', $opts)) {
+            $pt = ConvertFrom-BibleEpubHtml -Html $p.Groups[1].Value
+            if ($pt) { $pt }
+        })
+
+        # Psalm titles are verse 0, which is not a verse here - keep those
+        # notes on verse 1, but don't try to place a marker for them.
+        $noMark = $false
+        if (-not $byNum.ContainsKey($vnum)) {
+            if ($verses.Count -eq 0) { continue }
+            $vnum   = $verses[0].num
+            $noMark = $true
+        }
+
+        if (-not $noteLists.ContainsKey($vnum)) {
+            $noteLists[$vnum] = New-Object System.Collections.Generic.List[object]
+        }
+        $noteLists[$vnum].Add([PSCustomObject]@{
+            Label      = $label
+            Word       = $word
+            Paragraphs = $paras
+            Xref       = $xref
+            NoMark     = $noMark
+        })
+    }
+
+    foreach ($v in $verses) {
+        if ($noteLists.ContainsKey($v.num)) {
+            $v.notes = $noteLists[$v.num].ToArray()
+            Set-BibleVerseMarks -Verse $v
+        }
+    }
+
+    $chapterObj = [PSCustomObject]@{
+        Verses    = $verses.ToArray()
+        Copyright = $copyright
+    }
+    $script:BibleEpubCache[$id] = $chapterObj
+    return $chapterObj
+}
+
+function Invoke-BibleEpub {
+    # EPUB counterpart of Invoke-LsmApi. Understands "Book C", "Book C:V" and
+    # "Book C:V-V"; anything fancier gets an explanatory message back.
+    param([Parameter(Mandatory)][string]$Reference)
+
+    $path   = Get-BibleEpubPath
+    $layout = Get-BibleLayout
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        Write-Host ""
+        Write-BibleNote -Layout $layout -Text "EPUB not found: $path" -Color 'Warn'
+        Write-BibleNote -Layout $layout -Text 'Point at it again with  Set-BibleEpub "C:\path\HolyBible.epub"  (or Set-BibleEpub "" to use the API).'
+        return $null
+    }
+
+    $say = {
+        param($Msg)
+        [PSCustomObject]@{ verses = @(); copyright = $null; message = $Msg }
+    }
+
+    $ref = Expand-BibleReference $Reference
+    $dash = [string][char]0x2013
+    if ($ref -match '[;,]' -or $ref -notmatch"^(?<book>.+?)\s+(?<ch>\d+)(?:\s*:\s*(?<v1>\d+)(?:\s*[-$dash]\s*(?<v2>\d+))?)?$") {
+        return (& $say "EPUB mode reads 'Book Chapter', 'Book Chapter:Verse' or 'Book Chapter:Verse-Verse' - e.g. John 3:16-18.")
+    }
+    $bookName = $matches['book'].Trim()
+    $ch = [int]$matches['ch']
+    $v1 = if ($matches['v1']) { [int]$matches['v1'] } else { 0 }
+    $v2 = if ($matches['v2']) { [int]$matches['v2'] } else { $v1 }
+
+    $book = Get-BibleBookNumber -Name $bookName
+    if (-not $book) { return (& $say "Unknown book '$bookName'.") }
+
+    try {
+        $index = Get-BibleEpubIndex -Path $path
+        # Single-chapter books are usually cited by verse alone: "Jude 5".
+        if (-not $v1 -and $ch -gt 1 -and -not $index.Chapters.ContainsKey("$book|$ch") -and
+            $index.Chapters.ContainsKey("$book|1") -and -not $index.Chapters.ContainsKey("$book|2")) {
+            $v1 = $ch; $v2 = $ch; $ch = 1
+        }
+        $chapter = Read-BibleEpubChapter -Path $path -Book $book -Chapter $ch
+    } catch {
+        Write-Host ""
+        Write-BibleNote -Layout $layout -Text "Could not read the EPUB: $($_.Exception.Message)" -Color 'Danger'
+        return $null
+    }
+    if (-not $chapter) { return (& $say "$bookName has no chapter $ch.") }
+
+    $verses = @($chapter.Verses)
+    if ($v1) {
+        if ($v2 -lt $v1) { $t = $v1; $v1 = $v2; $v2 = $t }
+        $verses = @($verses | Where-Object { $_.num -ge $v1 -and $_.num -le $v2 })
+        if ($verses.Count -eq 0) { return (& $say "$bookName $ch has no verse $v1.") }
+    }
+
+    return [PSCustomObject]@{
+        verses    = $verses
+        copyright = $chapter.Copyright
+        message   = $null
+    }
+}
+
+function Set-BibleEpub {
+    # Set-BibleEpub "C:\Users\me\Downloads\HolyBible.epub"   read from the EPUB
+    # Set-BibleEpub ""                                         back to the API
+    # Writes the "epub" key into .lsm-verse.json, leaving appid/token alone.
+    param([string]$Path = "")
+
+    $layout     = Get-BibleLayout
+    $configPath = Get-BibleConfigPath
+
+    $config = [ordered]@{}
+    if (Test-Path $configPath) {
+        try {
+            $existing = Get-Content $configPath -Raw | ConvertFrom-Json
+            if ($existing) {
+                foreach ($p in $existing.PSObject.Properties) { $config[$p.Name] = $p.Value }
+            }
+        } catch {
+            Write-Host ""
+            Write-BibleNote -Layout $layout -Text "Could not read $configPath - is it valid JSON? Left it untouched." -Color 'Danger'
+            return
+        }
+    }
+
+    if ($Path) {
+        $Path = $Path.Trim('"', "'", ' ')
+        if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+            Write-Host ""
+            Write-BibleNote -Layout $layout -Text "No file at $Path" -Color 'Warn'
+            return
+        }
+        $full = (Resolve-Path -LiteralPath $Path).ProviderPath
+        try {
+            $count = (Get-BibleEpubIndex -Path $full).Chapters.Count
+        } catch {
+            $count = 0
+        }
+        if ($count -eq 0) {
+            Write-Host ""
+            Write-BibleNote -Layout $layout -Text "$full doesn't look like the Recovery Version EPUB (no chapter files found)." -Color 'Warn'
+            return
+        }
+        $config['epub'] = $full
+    } else {
+        $config['epub'] = ""
+    }
+
+    $config | ConvertTo-Json | Set-Content -Path $configPath -Encoding utf8
+    $script:BibleEpubIndex = $null
+    $script:BibleEpubCache = @{}
+
+    Write-Host ""
+    if ($Path) {
+        Write-BibleStyled ($layout.Pad + "reading from EPUB  ($count chapters)") -Color 'Accent'
+        Write-BibleNote -Layout $layout -Text $config['epub']
+    } else {
+        Write-BibleStyled ($layout.Pad + "EPUB cleared - using api.lsm.org") -Color 'Accent'
+    }
+    Write-Host ""
+}
+
 
 # ------------------------------------------------------------
 # Text rendering
@@ -556,6 +996,58 @@ function Split-BibleEmphasis {
     return @($tokens)
 }
 
+$script:BibleSuperscripts = @{
+    '0' = 0x2070; '1' = 0x00B9; '2' = 0x00B2; '3' = 0x00B3; '4' = 0x2074
+    '5' = 0x2075; '6' = 0x2076; '7' = 0x2077; '8' = 0x2078; '9' = 0x2079
+    'a' = 0x1D43; 'b' = 0x1D47; 'c' = 0x1D9C; 'd' = 0x1D48; 'e' = 0x1D49
+    'f' = 0x1DA0; 'g' = 0x1D4D; 'h' = 0x02B0; 'i' = 0x2071; 'j' = 0x02B2
+    'k' = 0x1D4F; 'l' = 0x02E1; 'm' = 0x1D50; 'n' = 0x207F; 'o' = 0x1D52
+    'p' = 0x1D56; 'r' = 0x02B3; 's' = 0x02E2; 't' = 0x1D57; 'u' = 0x1D58
+    'v' = 0x1D5B; 'w' = 0x02B7; 'x' = 0x02E3; 'y' = 0x02B8; 'z' = 0x1DBB
+}
+
+function Get-BibleSuperscript {
+    # "1a" -> superscript one + superscript a, for footnote markers. Built
+    # from code points so the file stays ASCII. Unicode has no superscript q,
+    # so a label with one (or anything unmapped) falls back to "^1q", as does
+    # a terminal without ANSI support.
+    param([string]$Label)
+
+    if (-not $Label) { return "" }
+    if (-not (Test-BibleAnsi)) { return "^$Label" }
+    $out = ""
+    foreach ($c in $Label.ToCharArray()) {
+        $cp = $script:BibleSuperscripts["$c"]
+        if ($c -eq '*') { $out += '*'; continue }
+        if (-not $cp)   { return "^$Label" }
+        $out += [string][char]$cp
+    }
+    return $out
+}
+
+function Get-BibleMarkedTokens {
+    # Split-BibleEmphasis tokens, each with the superscript for any footnote
+    # marker that follows it. $Marks maps token index -> label.
+    param([string]$Text, [hashtable]$Marks)
+
+    $tokens = @(Split-BibleEmphasis -Text $Text)
+    for ($i = 0; $i -lt $tokens.Count; $i++) {
+        $m = ""
+        if ($Marks -and $Marks.ContainsKey($i)) { $m = Get-BibleSuperscript $Marks[$i] }
+        $tokens[$i] | Add-Member -NotePropertyName Mark -NotePropertyValue $m -Force
+    }
+    return @($tokens)
+}
+
+function Get-BibleVerseDisplayText {
+    # The verse as it will appear on screen (no brackets, with markers) -
+    # what to measure when working out how many lines a verse will take.
+    param($Verse)
+
+    $parts = @(Get-BibleMarkedTokens -Text $Verse.text -Marks $Verse.marks | ForEach-Object { $_.Text + $_.Mark })
+    return ($parts -join " ")
+}
+
 function Write-BibleText {
     # Word-wraps on VISIBLE width (styling is applied at print time, never
     # baked into the string - ANSI codes would otherwise be counted as
@@ -564,7 +1056,8 @@ function Write-BibleText {
         [string]$Text,
         [string]$Prefix       = "",
         [string]$PrefixColor  = "AccentDim",
-        [int]   $Width
+        [int]   $Width,
+        [hashtable]$Marks
     )
 
     if ($Width -le 0) {
@@ -579,10 +1072,12 @@ function Write-BibleText {
     # even where the terminal ignores italics.
     $italicOn  = if ($ansi) { "$esc[3m" + (Get-BibleAnsiCode 'Emph') } else { "" }
     $italicOff = if ($ansi) { "$esc[23m" + $bodyCode } else { "" }
+    # Footnote markers: upright periwinkle, then back to whatever was on.
+    $markOn    = if ($ansi) { "$esc[23m" + (Get-BibleAnsiCode 'Accent') } else { "" }
 
     $indent = " " * $Prefix.Length
     $max    = [Math]::Max(10, $Width - $Prefix.Length - 1)
-    $tokens = Split-BibleEmphasis -Text $Text
+    $tokens = Get-BibleMarkedTokens -Text $Text -Marks $Marks
 
     $line   = @()   # tokens on the current line
     $len    = 0
@@ -604,20 +1099,32 @@ function Write-BibleText {
             if (-not $line[$j].Emph -and $open) { $sb += $italicOff; $open = $false }
             if ($j -gt 0) { $sb += " " }
             if ($line[$j].Emph -and -not $open) { $sb += $italicOn; $open = $true }
-            $sb += $line[$j].Text
+            if ($line[$j].Mark) {
+                # Marker hugs the word, inside any trailing punctuation:
+                # "teacher," -> "teacher" + marker + ",".
+                $word = $line[$j].Text
+                $tail = ""
+                if ($word -match '^(.*?[\p{L}\p{N}])([^\p{L}\p{N}]+)$') { $word = $matches[1]; $tail = $matches[2] }
+                $sb += $word + $markOn + $line[$j].Mark
+                if ($ansi) { $sb += $(if ($open) { $italicOn } else { $bodyCode }) }
+                $sb += $tail
+            } else {
+                $sb += $line[$j].Text
+            }
         }
         if ($open) { $sb += $italicOff }   # never leave italics on at line end
         Write-Host ($bodyCode + $sb + $reset)
     }
 
     foreach ($t in $tokens) {
-        $add = if ($len -eq 0) { $t.Text.Length } else { $t.Text.Length + 1 }
+        $w   = $t.Text.Length + $t.Mark.Length
+        $add = if ($len -eq 0) { $w } else { $w + 1 }
         if ($len -gt 0 -and ($len + $add) -gt $max) {
             & $flush
             $first = $false
             $line  = @()
             $len   = 0
-            $add   = $t.Text.Length
+            $add   = $w
         }
         $line += $t
         $len  += $add
@@ -629,12 +1136,13 @@ function Write-BibleText {
 function Write-BibleVerseLine {
     # Prints a verse with its number, wrapping long text with a hanging
     # indent so continuation lines line up under the verse text, not the number.
-    param([string]$Number, [string]$Text, $Layout)
+    param([string]$Number, [string]$Text, $Layout, [hashtable]$Marks)
 
     Write-BibleText -Text $Text `
                     -Prefix ($Layout.Pad + ("{0,3}  " -f $Number)) `
                     -PrefixColor 'AccentDim' `
-                    -Width $Layout.Text
+                    -Width $Layout.Text `
+                    -Marks $Marks
 }
 
 function Get-BibleVerseNumber {
@@ -757,6 +1265,8 @@ function Read-BibleInput {
                 40 { if (-not $buffer) { return @{ Action = "ScrollDown" } } } # Down arrow
                 34 { if (-not $buffer) { return @{ Action = "Submit"; Text = "N" } } } # PageDown
                 33 { if (-not $buffer) { return @{ Action = "Submit"; Text = "P" } } } # PageUp
+                39 { if (-not $buffer) { return @{ Action = "Submit"; Text = "N" } } } # Right arrow
+                37 { if (-not $buffer) { return @{ Action = "Submit"; Text = "P" } } } # Left arrow
                 32 {
                     # Space pages forward only when nothing typed yet;
                     # otherwise it is a real space inside "John 4".
@@ -781,11 +1291,12 @@ function Read-BibleInput {
                     $ch = $keyInfo.Character
                     if (-not $ch -or [int]$ch -lt 32 -or [int]$ch -eq 127) { break }
 
-                    # Nothing typed yet: N/P/S/Q fire instantly, no Enter.
+                    # Nothing typed yet: N/P/S/F/Q fire instantly, no Enter.
                     # Book names also start with N/P/S (Numbers, Psalm,
                     # Samuel, Song of Songs), so "/" opens typing mode for
-                    # those. Any other letter just starts typing normally,
-                    # so "John 4" still works with no prefix.
+                    # those. No book starts with F. Any other letter just
+                    # starts typing normally, so "John 4" still works with
+                    # no prefix.
                     if (-not $buffer) {
                         if ("$ch" -eq "/") {
                             Write-BibleStyled "reference: " -Color 'Accent' -NoNewline
@@ -795,7 +1306,7 @@ function Read-BibleInput {
                         if ("$ch" -eq "?") {
                             return @{ Action = "Define" }
                         }
-                        if ("$ch" -match '^[NnPpSsQq]$') {
+                        if ("$ch" -match '^[NnPpSsFfQq]$') {
                             Write-Host ""
                             return @{ Action = "Submit"; Text = "$ch" }
                         }
@@ -838,7 +1349,7 @@ function verse {
     }
 
     $rawRef = ($Reference -join " ").Trim()
-    $result = Invoke-LsmApi -Reference $rawRef
+    $result = Get-BiblePassage -Reference $rawRef
     if (-not $result) { return }
 
     Write-BibleHeader -Title (Expand-BibleReference $rawRef) -Note "Recovery Version" -Layout $layout
@@ -854,7 +1365,7 @@ function verse {
     $clipLines = @()
     $i = 1
     foreach ($v in $result.verses) {
-        Write-BibleVerseLine -Number (Get-BibleVerseNumber -Verse $v -Fallback $i) -Text $v.text -Layout $layout
+        Write-BibleVerseLine -Number (Get-BibleVerseNumber -Verse $v -Fallback $i) -Text $v.text -Layout $layout -Marks $v.marks
         Write-Host ""
         # Clipboard keeps the original brackets - plain text, no escape codes.
         $clipLines += "$(Expand-BibleReference $v.ref) - $($v.text)"
@@ -863,6 +1374,14 @@ function verse {
 
     if ($clipLines.Count -gt 0) {
         $clipLines -join "`r`n`r`n" | Set-Clipboard
+    }
+
+    # Superscripts with nowhere to read them would be a tease - point at the
+    # reader, which has the notes view.
+    $annotated = @(@($result.verses) | Where-Object { $_.notes })
+    if ($annotated.Count -gt 0 -and $annotated[0].ref -match '^(.+?):\d+$') {
+        Write-BibleNote -Layout $layout -Text ("footnotes: bible {0}, then press F" -f $matches[1])
+        Write-Host ""
     }
 
     Write-BibleRule -Layout $layout
@@ -1032,8 +1551,9 @@ function verselist {
         $ch  = "$($key.Char)".ToUpper()
         Write-Host ""
 
-        if ($key.Code -eq 40 -and $hasNext) { $index += $pageSize; continue }   # Down arrow
-        if ($key.Code -eq 38 -and $hasPrev) { $index -= $pageSize; continue }   # Up arrow
+        # Down / Right arrow: next page.  Up / Left arrow: previous page.
+        if (($key.Code -eq 40 -or $key.Code -eq 39) -and $hasNext) { $index += $pageSize; continue }
+        if (($key.Code -eq 38 -or $key.Code -eq 37) -and $hasPrev) { $index -= $pageSize; continue }
 
         switch ($ch) {
             "N" { if ($hasNext) { $index += $pageSize } }
@@ -1084,7 +1604,7 @@ function savedverses {
 
     $copyright = $null
     foreach ($v in $saved) {
-        $result = Invoke-LsmApi -Reference $v.ref
+        $result = Get-BiblePassage -Reference $v.ref
 
         $ref  = Expand-BibleReference $v.ref
         $line = $layout.Pad + (Get-BibleStyled -Text $ref -Color 'Gold' -Bold)
@@ -1096,7 +1616,7 @@ function savedverses {
 
         if ($result -and $result.verses -and $result.verses.Count -gt 0) {
             foreach ($verseObj in $result.verses) {
-                Write-BibleText -Text $verseObj.text -Prefix ($layout.Pad + "  ") -Width $layout.Text
+                Write-BibleText -Text $verseObj.text -Prefix ($layout.Pad + "  ") -Width $layout.Text -Marks $verseObj.marks
             }
             if ($result.copyright) { $copyright = $result.copyright }
         } else {
@@ -1110,6 +1630,178 @@ function savedverses {
         Write-BibleNote -Layout $layout -Text $copyright
         Write-Host ""
     }
+}
+
+
+# ------------------------------------------------------------
+# Footnotes (EPUB only)
+# ------------------------------------------------------------
+
+function Select-BiblePageVerse {
+    # One keypress picks a verse: the candidates are labelled a, b, c... so
+    # no typing (and no multi-digit verse numbers) is needed. Returns the
+    # chosen index into $Verses, or -1 if cancelled.
+    param($Verses, [int[]]$Indices, $Layout, [string]$Action = "save")
+
+    $letters = [char[]]"abcdefghijklmnopqrstuvwxyz"
+    $Indices = @($Indices | Select-Object -First $letters.Count)
+
+    Write-Host ""
+    for ($li = 0; $li -lt $Indices.Count; $li++) {
+        Write-Host ($Layout.Pad +
+                    (Get-BibleStyled -Text ("{0}  " -f $letters[$li]) -Color 'Accent' -Bold) +
+                    (Get-BibleStyled -Text (Expand-BibleReference $Verses[$Indices[$li]].ref) -Color 'Body'))
+    }
+    Write-Host ""
+    Write-BibleStyled ($Layout.Pad + "press a letter to $Action, any other key cancels") -Color 'Muted'
+    Write-BiblePrompt -Layout $Layout
+    $pk = "$((Read-BibleKey).Char)".ToLower()
+    Write-Host ""
+
+    if ($pk.Length -ne 1) { return -1 }
+    $li = [Array]::IndexOf($letters, [char]$pk)
+    if ($li -ge 0 -and $li -lt $Indices.Count) { return $Indices[$li] }
+    return -1
+}
+
+function Show-BiblePagedLines {
+    # A small pager for pre-styled lines. $Build is called with the current
+    # layout on every draw and returns the lines, so a resize re-wraps them.
+    # N / Space / PgDn / Right page forward and P / PgUp / Left page back;
+    # Down / Up scroll a line. Anything else returns.
+    param([string]$Title, [string]$Note, [scriptblock]$Build, [string]$Copyright)
+
+    $top = 0
+    while ($true) {
+        Clear-Host
+        $layout = Get-BibleLayout
+        $lines  = @(& $Build $layout)
+
+        try   { $termHeight = $Host.UI.RawUI.WindowSize.Height }
+        catch { $termHeight = 25 }
+
+        # Same chrome budget as the chapter reader: 4 lines of header, then
+        # rule + status + copyright + blank + prompt.
+        $probeStatus = "lines {0}{1}{0} of {0}" -f $lines.Count, (Get-BibleGlyph 'Dash')
+        $probeHints  = @(, @("N", "next"), @("P", "prev"), @("Q", "back"))
+        $chrome = 7 + @(Get-BibleStatusLines -Layout $layout -Status $probeStatus -Hints $probeHints).Count
+        if ($Copyright) {
+            $chrome += @(Get-BibleWrappedLines -Text $Copyright -PrefixLength $layout.Margin -Width $layout.Text).Count
+        }
+        $avail = [Math]::Max(3, $termHeight - $chrome)
+
+        if ($top -ge $lines.Count) { $top = [Math]::Max(0, $lines.Count - $avail) }
+        $end = [Math]::Min($top + $avail, $lines.Count) - 1
+
+        Write-BibleHeader -Title $Title -Note $Note -Layout $layout
+        for ($i = $top; $i -le $end; $i++) { Write-Host $lines[$i] }
+        Write-BibleRule -Layout $layout
+
+        $hasNext = ($end + 1) -lt $lines.Count
+        $hasPrev = $top -gt 0
+        $hints = @()
+        if ($hasNext) { $hints += , @("N", "next") }
+        if ($hasPrev) { $hints += , @("P", "prev") }
+        $hints += , @("Q", "back")
+        $status = ""
+        if ($hasNext -or $hasPrev) {
+            $status = "lines {0}{1}{2} of {3}" -f ($top + 1), (Get-BibleGlyph 'Dash'), ($end + 1), $lines.Count
+        }
+        Write-BibleStatusBar -Layout $layout -Status $status -Hints $hints
+        if ($Copyright) { Write-BibleNote -Layout $layout -Text $Copyright }
+        Write-Host ""
+        Write-BiblePrompt -Layout $layout
+
+        $key = Read-BibleKey
+        $ch  = "$($key.Char)".ToUpper()
+        # Everything fits on one screen: any key at all goes back.
+        if (-not $hasNext -and -not $hasPrev) { return }
+        if ($ch -eq 'N' -or $key.Code -eq 32 -or $key.Code -eq 34 -or $key.Code -eq 39) {
+            if ($hasNext) { $top = $end + 1 }
+        } elseif ($key.Code -eq 40) {
+            if ($hasNext) { $top++ }
+        } elseif ($ch -eq 'P' -or $key.Code -eq 33 -or $key.Code -eq 37) {
+            $top = [Math]::Max(0, $top - $avail)
+        } elseif ($key.Code -eq 38) {
+            if ($hasPrev) { $top-- }
+        } else {
+            return
+        }
+    }
+}
+
+function Get-BibleVerseNoteLines {
+    # The notes view for one verse, as styled lines wrapped to $Layout:
+    # footnotes first (label, word, paragraphs), then cross-references.
+    param($Verse, $Layout)
+
+    $out = New-Object System.Collections.Generic.List[string]
+    $notes = @($Verse.notes)
+
+    # "1a" is footnote 1 and cross-reference a on the same word.
+    $footnotes = @($notes | Where-Object { $_.Paragraphs.Count -gt 0 })
+    $xrefs     = @($notes | Where-Object { $_.Xref })
+
+    foreach ($n in $footnotes) {
+        $label  = $n.Label -replace '[a-z]', ''
+        if (-not $label) { $label = $n.Label }
+        $prefix = $Layout.Pad + ("{0,3}  " -f $label)
+        $indent = " " * $prefix.Length
+        $word   = if ($n.Word) { $n.Word } else { "" }
+        $out.Add((Get-BibleStyled -Text $prefix -Color 'GoldDim') + (Get-BibleStyled -Text $word -Color 'Accent' -Bold))
+        $firstPara = $true
+        foreach ($p in $n.Paragraphs) {
+            if (-not $firstPara) { $out.Add("") }
+            $firstPara = $false
+            foreach ($l in @(Get-BibleWrappedLines -Text $p -PrefixLength $prefix.Length -Width $Layout.Text)) {
+                $out.Add($indent + (Get-BibleStyled -Text $l -Color 'Body'))
+            }
+        }
+        $out.Add("")
+    }
+
+    if ($xrefs.Count -gt 0) {
+        $out.Add($Layout.Pad + (Get-BibleStyled -Text "cross-references" -Color 'Gold' -Bold))
+        # Line the references up in a column, unless one long word would
+        # push them all off to the right.
+        $col = [Math]::Min(16, (@($xrefs | ForEach-Object { "$($_.Word)".Length }) | Measure-Object -Maximum).Maximum)
+        foreach ($n in $xrefs) {
+            $label  = $n.Label -replace '[\d\*]', ''
+            if (-not $label) { $label = $n.Label }
+            $prefix = $Layout.Pad + ("{0,3}  " -f $label)
+            $indent = " " * $prefix.Length
+            $word   = if ($n.Word) { $n.Word.PadRight($col) } else { "".PadRight($col) }
+            $room   = $Layout.Text - $prefix.Length - 1
+
+            $head = (Get-BibleStyled -Text $prefix -Color 'GoldDim') + (Get-BibleStyled -Text $word -Color 'Accent')
+            if (($word.Length + 2 + $n.Xref.Length) -le $room) {
+                $out.Add($head + "  " + (Get-BibleStyled -Text $n.Xref -Color 'Muted'))
+            } else {
+                $out.Add($head)
+                foreach ($l in @(Get-BibleWrappedLines -Text $n.Xref -PrefixLength $prefix.Length -Width $Layout.Text)) {
+                    $out.Add($indent + (Get-BibleStyled -Text $l -Color 'Muted'))
+                }
+            }
+        }
+        $out.Add("")
+    }
+
+    # No trailing blank above the closing rule.
+    while ($out.Count -gt 0 -and $out[$out.Count - 1] -eq "") { $out.RemoveAt($out.Count - 1) }
+    return $out.ToArray()
+}
+
+function Show-BibleVerseNotes {
+    param($Verse, [string]$Copyright)
+
+    # The pager calls $build from inside itself, where $notesVerse is still
+    # in scope (PowerShell scoping is dynamic).
+    $notesVerse = $Verse
+    $build = {
+        param($Layout)
+        Get-BibleVerseNoteLines -Verse $notesVerse -Layout $Layout
+    }
+    Show-BiblePagedLines -Title (Expand-BibleReference $Verse.ref) -Note "notes" -Copyright $Copyright -Build $build
 }
 
 
@@ -1133,7 +1825,7 @@ function bible {
         return
     }
 
-    $result = Invoke-LsmApi -Reference $chapterRef
+    $result = Get-BiblePassage -Reference $chapterRef
     if (-not $result) { return }
 
     if (-not $result.verses -or $result.verses.Count -eq 0) {
@@ -1166,7 +1858,7 @@ function bible {
         # wraps onto extra lines in a narrow pane - measured with the widest
         # status text and the full hint set so a page can never overflow.
         $probeStatus = "verses {0}{1}{0} of {0}" -f $verses.Count, (Get-BibleGlyph 'Dash')
-        $probeHints  = @(, @("N", "next"), @("P", "prev"), @("S", "save"), @("?", "define"), @("Q", "quit"))
+        $probeHints  = @(, @("N", "next"), @("P", "prev"), @("S", "save"), @("F", "notes"), @("?", "define"), @("Q", "quit"))
         $chrome = 7 + @(Get-BibleStatusLines -Layout $layout -Status $probeStatus -Hints $probeHints).Count
         if ($result.copyright) {
             $chrome += @(Get-BibleWrappedLines -Text $result.copyright -PrefixLength $layout.Margin -Width $layout.Text).Count
@@ -1181,7 +1873,7 @@ function bible {
         $pageEnd   = $index
         $linesUsed = 0
         for ($i = $index; $i -lt $verses.Count; $i++) {
-            $need = (Get-BibleWrappedLines -Text $verses[$i].text -PrefixLength $prefixLen -Width $layout.Text).Count + 1
+            $need = (Get-BibleWrappedLines -Text (Get-BibleVerseDisplayText $verses[$i]) -PrefixLength $prefixLen -Width $layout.Text).Count + 1
             if (($linesUsed + $need) -gt $availableLines -and $i -gt $index) { break }
             $linesUsed += $need
             $pageEnd = $i
@@ -1189,7 +1881,7 @@ function bible {
 
         for ($i = $index; $i -le $pageEnd; $i++) {
             Write-BibleVerseLine -Number (Get-BibleVerseNumber -Verse $verses[$i] -Fallback ($i + 1)) `
-                                 -Text $verses[$i].text -Layout $layout
+                                 -Text $verses[$i].text -Layout $layout -Marks $verses[$i].marks
             Write-Host ""
         }
 
@@ -1197,10 +1889,14 @@ function bible {
 
         $hasNext = ($pageEnd + 1) -lt $verses.Count
         $hasPrev = $index -gt 0
+        # Verses on this page that have footnotes or cross-references (EPUB
+        # only - the API carries none).
+        $withNotes = @(for ($i = $index; $i -le $pageEnd; $i++) { if ($verses[$i].notes) { $i } })
         $hints = @()
         if ($hasNext) { $hints += , @("N", "next") }
         if ($hasPrev) { $hints += , @("P", "prev") }
         $hints += , @("S", "save")
+        if ($withNotes.Count -gt 0) { $hints += , @("F", "notes") }
         $hints += , @("?", "define")
         $hints += , @("Q", "quit")
 
@@ -1264,28 +1960,24 @@ function bible {
                         }
                     }
                     "S" {
-                        # One keypress picks a verse: label the verses on this
-                        # page a, b, c... so no typing (and no multi-digit
-                        # verse numbers) is needed.
-                        $letters = [char[]]"abcdefghijklmnopqrstuvwxyz"
-                        Write-Host ""
-                        for ($i = $index; $i -le $pageEnd; $i++) {
-                            $li = $i - $index
-                            if ($li -ge $letters.Count) { break }
-                            Write-Host ($layout.Pad +
-                                        (Get-BibleStyled -Text ("{0}  " -f $letters[$li]) -Color 'Accent' -Bold) +
-                                        (Get-BibleStyled -Text (Expand-BibleReference $verses[$i].ref) -Color 'Body'))
-                        }
-                        Write-Host ""
-                        Write-BibleStyled ($layout.Pad + "press a letter to save, any other key cancels") -Color 'Muted'
-                        Write-BiblePrompt -Layout $layout
-                        $pk = "$((Read-BibleKey).Char)".ToLower()
-                        Write-Host ""
-                        $li = [Array]::IndexOf($letters, [char]$pk)
-                        if ($li -ge 0 -and ($index + $li) -le $pageEnd) {
+                        $pick = Select-BiblePageVerse -Verses $verses -Indices @($index..$pageEnd) -Layout $layout -Action "save"
+                        if ($pick -ge 0) {
                             Write-Host ""
-                            Save-LsmVerse -Reference $verses[$index + $li].ref -Layout $layout
+                            Save-LsmVerse -Reference $verses[$pick].ref -Layout $layout
                             Start-Sleep -Milliseconds 750
+                        }
+                    }
+                    "F" {
+                        # Only the annotated verses get a letter; with just
+                        # one on the page there is nothing to choose.
+                        $pick = -1
+                        if ($withNotes.Count -eq 1) {
+                            $pick = $withNotes[0]
+                        } elseif ($withNotes.Count -gt 1) {
+                            $pick = Select-BiblePageVerse -Verses $verses -Indices $withNotes -Layout $layout -Action "read its notes"
+                        }
+                        if ($pick -ge 0) {
+                            Show-BibleVerseNotes -Verse $verses[$pick] -Copyright $result.copyright
                         }
                     }
                     "Q" {
@@ -1296,7 +1988,7 @@ function bible {
                     }
                     default {
                         # anything else is treated as a new "Book Chapter" reference to jump to
-                        $newResult = Invoke-LsmApi -Reference $trimmed
+                        $newResult = Get-BiblePassage -Reference $trimmed
                         if ($newResult -and $newResult.verses -and $newResult.verses.Count -gt 0) {
                             # Remember where we were so Backspace can return.
                             $readingHistory.Add([PSCustomObject]@{

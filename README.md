@@ -8,6 +8,11 @@ It talks to the free `txo.php` API at `api.lsm.org`. You need your own
 `appid` and `token` from [api.lsm.org](https://api.lsm.org) - registration is
 free.
 
+**Or read from your own EPUB instead.** If you have the Recovery Version
+EPUB, point the tool at it and it reads straight from the file - no API, no
+credentials - and you get the **footnotes and cross-references** too. See
+[Reading from your EPUB](#reading-from-your-epub-with-footnotes).
+
 ## Want a free study Bible?
 
 - Canada: [biblesforcanada.org/order](https://www.biblesforcanada.org/order)
@@ -21,6 +26,7 @@ free.
 | `bible John 3` | Opens a full-chapter reader, one screen-page at a time, sized to your terminal window. |
 | `verse list` | Browse your saved verses. Press a number to read one - no Enter needed. |
 | `savedverses` | Prints every saved verse in one go (non-interactive). |
+| `Set-BibleEpub <path>` | Read from your Recovery Version EPUB instead of the API (adds footnotes). `Set-BibleEpub ""` switches back. |
 
 ### The chapter reader (`bible`)
 
@@ -48,9 +54,10 @@ Single keypress, **no Enter needed**:
 
 | Key | Does |
 |---|---|
-| `N` or `Space` or `PgDn` | Next page |
-| `P` or `PgUp` | Previous page |
+| `N`, `Space`, `PgDn` or `Right` arrow | Next page |
+| `P`, `PgUp` or `Left` arrow | Previous page |
 | `S` or `Tab` | Save a verse - labels the verses `a`, `b`, `c`... press one letter |
+| `F` | Read a verse's footnotes and cross-references (EPUB only) - pick it by letter, as with `S` |
 | `Q` or `Esc` | Quit |
 | `Up` / `Down` arrow | Scroll one verse at a time (best in a small window) |
 | `?` | Look up a word - type it, press Enter, then any key to return to your place (clipboard untouched) |
@@ -59,7 +66,7 @@ Single keypress, **no Enter needed**:
 **Jumping to another chapter:** type the reference and press Enter, e.g.
 `John 4`.
 
-One catch: `N`, `P`, `S`, and `Q` now fire instantly, so a book starting with
+One catch: `N`, `P`, `S`, `F`, and `Q` now fire instantly, so a book starting with
 those letters can't be typed directly. Press `/` first to open typing mode:
 
 ```
@@ -109,6 +116,63 @@ This is display only. Saved references and clipboard copies keep working
 whatever you typed, and anything the tool doesn't recognise is shown as you
 typed it rather than dropped.
 
+### Reading from your EPUB (with footnotes)
+
+If you own the Recovery Version EPUB (`HolyBible.epub`), run this once:
+
+```powershell
+Set-BibleEpub "C:\Users\<you>\Downloads\HolyBible.epub"
+```
+
+It saves the path as `"epub"` in `%USERPROFILE%\.lsm-verse.json`, next to
+your appid/token, which it leaves alone. From then on `verse`, `bible` and
+`savedverses` read from the EPUB, and api.lsm.org isn't contacted at all.
+`Set-BibleEpub ""` goes back to the API.
+
+**Footnote markers.** In the reader, words that have a footnote or
+cross-reference get a small superscript, the same way the printed edition
+marks them:
+
+```
+    3  Jesus answered and said to him, Truly, truly, I say to you, Unless
+       one is born¹ᵃ anew, he cannot see² the kingdom³ᵇ of God.
+```
+
+Numbers are footnotes and letters are cross-references. The EPUB names the
+word each note belongs to but not where it sits in the verse, so where a
+word repeats in a verse the tool works out which one is meant from the
+order of the notes. That's right in all but a handful of the ~36,000 notes.
+
+**Reading the notes.** Press `F`. The verses on the page that have notes
+get the letters `a`, `b`, `c`..., and you press one to pick a verse. If only
+one verse on the page has notes, it opens straight away. You get:
+
+```
+  John 3:3                                                         notes
+  ───────────────────────────────────────────────────────────────────────
+
+    1  born
+       Or, born from above. So in v. 7. To be born anew is to be born
+       from above, from heaven, that is, to be born from God...
+
+    2  see
+       In spiritual things, to see is to enter into (v. 5).
+
+  cross-references
+    a  born     1 Pet. 1:23
+    b  kingdom  John 3:5
+```
+
+A long note pages with `N`/`P` (or the arrow keys). Any other key takes you
+back to the same place in the chapter.
+
+`verse John 3:16` shows the markers too, plus a pointer to open the chapter
+in the reader to read them.
+
+In EPUB mode references take the forms `John 3`, `John 3:16` and
+`John 3:16-18` (single-chapter books also take `Jude 5`). Lists like
+`John 3:16; 4:1` are API-only.
+
 ### Colours
 
 The palette is periwinkle for anything you can act on - prompts, key hints,
@@ -141,7 +205,8 @@ box-drawing characters.
 
 Press a **number** to pull that verse from the API and read it (it also lands
 on your clipboard). Press **D** then a number to delete one. **Q** goes back.
-All single keypresses - no Enter.
+The arrow keys (or **N** / **P**) turn the pages. All single keypresses - no
+Enter.
 
 ## Install
 
@@ -196,7 +261,7 @@ All single keypresses - no Enter.
 
 | File | Purpose |
 |---|---|
-| `%USERPROFILE%\.lsm-verse.json` | Your API credentials. **Never share this file or commit it anywhere.** |
+| `%USERPROFILE%\.lsm-verse.json` | Your API credentials, and optionally the path to your EPUB (`"epub"`). **Never share this file or commit it anywhere.** |
 | `%USERPROFILE%\.lsm-saved-verses.txt` | References (not verse text) you've saved. One per line as `Reference\|timestamp` - open it in Notepad and edit freely. An older `.json` store is migrated automatically the first time you run the tool. |
 
 ### Looking up words (`?` while reading)
@@ -241,3 +306,7 @@ displayed. This tool follows both: `savedverses` only ever stores the
 time you run it, and every command that displays verse text also displays
 the attribution line. Clipboard copies (from `verse`) are a transient,
 in-memory convenience rather than a stored file.
+
+**EPUB mode** uses your own copy of the book. It's read live, straight out
+of the `.epub`, every time. Nothing is extracted or cached on disk, and the
+EPUB's own copyright line is shown wherever its text is shown.
